@@ -22,6 +22,14 @@ For each row, builds a pin (2:3 ratio, Pinterest's preferred size):
 and saves it as a compressed JPEG in the output folder (small file size,
 no visible quality loss - see JPEG_QUALITY below).
 
+Each pin is also assigned a Pinterest board automatically, based on
+keywords found in its title (see BOARD_RULES below) - e.g. a title about
+someone's career/family history goes to "Celebrity Bios", a title about a
+lawsuit/breakup goes to "Celebrity News & Drama", and so on. Titles that
+don't match any rule fall back to PINTEREST_BOARD. You don't need to
+create these boards manually - Pinterest creates a board automatically
+the first time it sees a new name in the bulk-upload CSV.
+
 If GOOGLE_SERVICE_ACCOUNT_JSON and SHEET_ID are set, it also writes each
 pin's public GitHub link back into a "Pin Link" column in your live
 Google Sheet (this part is optional - the script works fine without it,
@@ -55,7 +63,8 @@ PINS_PER_DAY / UTM_QUERY unset to be prompted for them instead:
     TITLE_COL                 - optional. Defaults to "title".
     WATERMARK_TEXT            - optional. Defaults to "Akash".
     JPEG_QUALITY              - optional. 1-95. Defaults to 85 (high quality, small file).
-    PINTEREST_BOARD           - optional. Defaults to "Boredpanda Viral".
+    PINTEREST_BOARD           - optional. Fallback board used when a title doesn't match
+                                any rule in BOARD_RULES. Defaults to "Boredpanda Viral".
     PINTEREST_THUMBNAIL       - optional. Defaults to "0:00" (matches Pinterest's template).
     PINS_PER_DAY              - optional. If unset, you'll be prompted (default if not interactive: 10).
     UTM_QUERY                 - optional. If unset, you'll be prompted. Set to an empty
@@ -69,7 +78,7 @@ PINS_PER_DAY / UTM_QUERY unset to be prompted for them instead:
                                 live Sheet instead of just using the CSV.
     SHEET_ID                  - optional, advanced. Required together with
                                 GOOGLE_SERVICE_ACCOUNT_JSON to write links back.
-    PIN_LINK_COL              - optional. Defaults to "Pin Link".
+    PIN_LINK_COL               - optional. Defaults to "Pin Link".
 
     MAKE_VIDEO                 - optional. "true"/"false", defaults to "true".
                                 "true"  = every pin is a silent .mp4 (the image held on screen
@@ -81,9 +90,18 @@ PINS_PER_DAY / UTM_QUERY unset to be prompted for them instead:
                                           that's what the CSV points at.
                                 Each row only ever gets ONE media type - never both - so the
                                 Pinterest bulk-upload CSV only ever uploads one thing per row.
-    VIDEO_DURATIONS            - optional. Comma-separated seconds to pick randomly from.
+    VIDEO_DURATIONS             - optional. Comma-separated seconds to pick randomly from.
                                 Defaults to "4,5,6".
-    VIDEO_FPS                  - optional. Defaults to 30.
+    VIDEO_FPS                   - optional. Defaults to 30.
+
+NOTE on "trending boards": there's no public API or reliable data source
+that exposes which specific Pinterest board names are trending right now,
+so this script can't pick board names based on live trend data. What it
+does instead is group your pins into a small set of clearly-differentiated,
+topic-specific boards (via keyword matching below) - which is the part of
+board strategy you actually control, and is what Pinterest's own guidance
+points to as helping discoverability. Edit BOARD_RULES to match how your
+BoredPanda content naturally clusters.
 """
 
 import csv
@@ -131,12 +149,67 @@ VIDEO_FPS = int(os.environ.get("VIDEO_FPS", "30"))
 # not committed - so each row's CSV entry points at exactly one media type.
 
 # Pinterest bulk-upload CSV formatting
-PINTEREST_BOARD = os.environ.get("PINTEREST_BOARD", "Boredpanda Viral")
+PINTEREST_BOARD = os.environ.get("PINTEREST_BOARD", "Boredpanda Viral")  # fallback board
 PINTEREST_THUMBNAIL = os.environ.get("PINTEREST_THUMBNAIL", "0:00")
 DEFAULT_UTM_QUERY = "utm_source=pinterest&utm_medium=social&utm_campaign=akash"
 DEFAULT_PINS_PER_DAY = 10
 PUBLISH_START_OFFSET_DAYS = int(os.environ.get("PUBLISH_START_OFFSET_DAYS", "1"))
-CSV_CHUNK_SIZE = int(os.environ.get("CSV_CHUNK_SIZE", "100"))
+CSV_CHUNK_SIZE = int(os.environ.get("CSV_CHUNK_SIZE", "100"))  # Pinterest's bulk tool officially
+                                                                 # allows up to 200 rows per upload,
+                                                                 # but many creators report fewer
+                                                                 # failures staying under ~100-150,
+                                                                 # so 100 is used as a safer default
+
+# ---------------------------------------------------------------------------
+# Board auto-selection
+# ---------------------------------------------------------------------------
+# Each entry: (list of keywords/phrases to look for in the title, board name
+# to use when one of them matches). Checked top to bottom - first match wins,
+# so put more specific rules above more general ones. If nothing matches,
+# the pin falls back to PINTEREST_BOARD.
+#
+# Edit this list freely to match how your BoredPanda titles actually cluster -
+# these are a reasonable starting point for celebrity/viral content.
+BOARD_RULES = [
+    (
+        ["bio and career", "career highlights", "biography", "early life", "net worth",
+         "rise to fame", "before fame", "life story", "all about"],
+        "Celebrity Bios",
+    ),
+    (
+        ["scandal", "controvers", "lawsuit", "court", "arrested", "charged", "fired",
+         "cancelled", "backlash", "feud", "cheating", "affair", "divorce filing"],
+        "Celebrity News & Drama",
+    ),
+    (
+        ["dating", "relationship", "boyfriend", "girlfriend", "husband", "wife",
+         "engaged", "engagement", "married", "wedding", "breakup", "split up"],
+        "Celebrity Relationships",
+    ),
+    (
+        ["fact", "facts", "did you know", "history of", "true story", "science behind"],
+        "Bizarre Facts",
+    ),
+    (
+        ["weird", "bizarre", "strange", "shocking", "unbelievable", "insane", "wow",
+         "you won't believe", "no one expected"],
+        "Weird & Viral Stories",
+    ),
+]
+
+
+def pick_board(title: str) -> str:
+    """Return the topic-specific board name for a pin's title, based on BOARD_RULES.
+    Falls back to PINTEREST_BOARD if no keyword matches."""
+    if not title:
+        return PINTEREST_BOARD
+    lowered = title.lower()
+    for keywords, board_name in BOARD_RULES:
+        for kw in keywords:
+            if kw in lowered:
+                return board_name
+    return PINTEREST_BOARD
+
 
 # Optional: write pin links back into the Google Sheet
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
@@ -459,9 +532,10 @@ def add_utm_params(url: str, utm_query: str) -> str:
 def build_publish_dates(count: int, pins_per_day: int):
     """
     One date string per row, in Pinterest's required YYYY-MM-DD format. Starts
-    PUBLISH_START_OFFSET_DAYS days from today, and advances by one day
-    every `pins_per_day` rows - counting every row (even ones whose pin
-    failed), so the schedule never skips or leaves a gap.
+    PUBLISH_START_OFFSET_DAYS days from today, and advances by one day every
+    `pins_per_day` rows. `count` here is the number of rows actually going
+    into the CSV (failed/incomplete rows are excluded before this is called),
+    so the schedule reflects real pins, not attempted ones.
     """
     start = date.today() + timedelta(days=PUBLISH_START_OFFSET_DAYS)
     dates = []
@@ -565,6 +639,7 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
     rows: list of dicts with keys "title", "media_url", "link" - one per
     attempted row (title/media_url blank if that row's pin failed).
     Writes a CSV ready to import into Pinterest's bulk-upload tool.
+    Each row's board is picked automatically from its title via pick_board().
     """
     dates = build_publish_dates(len(rows), pins_per_day)
     # Pinterest requires the Thumbnail column ONLY for video Pins, and wants it
@@ -578,7 +653,7 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
             writer.writerow([
                 truncate_title(title) if title else "",
                 row.get("media_url", ""),
-                PINTEREST_BOARD,
+                pick_board(title) if title else PINTEREST_BOARD,
                 thumbnail_value,
                 generate_description(title) if title else "",
                 row.get("link", ""),
@@ -654,6 +729,14 @@ def main():
         os.makedirs(os.path.join(LATEST_RUN_DIR, "videos"), exist_ok=True)
         os.makedirs(os.path.join(OUTPUT_DIR, "videos"), exist_ok=True)
 
+    if not GITHUB_REPOSITORY:
+        print(
+            "WARNING: GITHUB_REPOSITORY is not set, so no pin will have a public Media URL. "
+            "Pinterest's bulk-upload CSV requires a non-empty Media URL for every row, so "
+            "every row will be left out of pinterest_bulk_upload.csv until this is set.",
+            file=sys.stderr,
+        )
+
     print(f"Fetching sheet: {SHEET_CSV_URL}")
     df = pd.read_csv(SHEET_CSV_URL)
     df.columns = [c.strip().lower() for c in df.columns]
@@ -677,7 +760,9 @@ def main():
     print(f"Mode: {mode_name}")
 
     success, failed = 0, 0
-    pinterest_rows = []           # one entry per attempted row - for the Pinterest bulk-upload CSV
+    pinterest_rows = []           # one entry per SUCCESSFUL pin only - Pinterest requires every row in
+                                   # the bulk-upload CSV to have a Title and Media URL, so failed/blank
+                                   # rows are never written to the CSV (see the append below)
     pin_links_in_row_order = []   # one entry per EVERY sheet row (including blanks) - for the optional Sheets write-back
 
     for i, row in df.iterrows():
@@ -727,14 +812,14 @@ def main():
                 os.makedirs(os.path.dirname(permanent_video_path), exist_ok=True)
                 shutil.copy2(latest_video_path, permanent_video_path)
                 pin_link = build_pin_link(f"videos/{video_name}")
-                print(f"[OK]   {video_name} ({video_duration}s)")
+                print(f"[OK]   {video_name} ({video_duration}s) -> board: {pick_board(title)}")
             else:
                 # Picture-only mode: the JPEG itself is the pin - commit it permanently
                 # and point the CSV at it.
                 permanent_image_path = os.path.join(OUTPUT_DIR, out_name)
                 shutil.copy2(out_path, permanent_image_path)
                 pin_link = build_pin_link(out_name)
-                print(f"[OK]   {out_name}")
+                print(f"[OK]   {out_name} -> board: {pick_board(title)}")
 
             row_title = title
             success += 1
@@ -742,10 +827,24 @@ def main():
             failed += 1
             print(f"[FAIL] row {i+1}: {e}", file=sys.stderr)
 
-        pinterest_rows.append({"title": row_title, "media_url": pin_link, "link": row_article_link})
+        # Only add this row to the Pinterest bulk-upload CSV if it actually has the two fields
+        # Pinterest requires on every row: a Title and a Media URL. A row generated the pin
+        # image/video successfully (row_title set) but ended up with no public Media URL
+        # (pin_link blank - almost always because GITHUB_REPOSITORY isn't set) is just as
+        # invalid to Pinterest as a row that failed outright, so both are skipped here rather
+        # than written as a broken row.
+        if row_title and pin_link:
+            pinterest_rows.append({"title": row_title, "media_url": pin_link, "link": row_article_link})
         pin_links_in_row_order.append(pin_link)
 
+    skipped_from_csv = success - len(pinterest_rows)
     print(f"\nDone. {success} pins created, {failed} failed. Output: {OUTPUT_DIR}/")
+    if skipped_from_csv:
+        print(
+            f"NOTE: {skipped_from_csv} pin(s) were built but left out of the bulk-upload CSV "
+            f"because they had no public Media URL (check GITHUB_REPOSITORY is set).",
+            file=sys.stderr,
+        )
 
     if pinterest_rows:
         chunks = [pinterest_rows[i:i + CSV_CHUNK_SIZE] for i in range(0, len(pinterest_rows), CSV_CHUNK_SIZE)]
