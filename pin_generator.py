@@ -458,7 +458,7 @@ def add_utm_params(url: str, utm_query: str) -> str:
 
 def build_publish_dates(count: int, pins_per_day: int):
     """
-    One date string per row, in Pinterest's DD/MM/YYYY format. Starts
+    One date string per row, in Pinterest's required YYYY-MM-DD format. Starts
     PUBLISH_START_OFFSET_DAYS days from today, and advances by one day
     every `pins_per_day` rows - counting every row (even ones whose pin
     failed), so the schedule never skips or leaves a gap.
@@ -467,7 +467,7 @@ def build_publish_dates(count: int, pins_per_day: int):
     dates = []
     for i in range(count):
         day_offset = i // pins_per_day
-        dates.append((start + timedelta(days=day_offset)).strftime("%d/%m/%Y"))
+        dates.append((start + timedelta(days=day_offset)).strftime("%Y-%m-%d"))
     return dates
 
 
@@ -478,6 +478,9 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
     Writes a CSV ready to import into Pinterest's bulk-upload tool.
     """
     dates = build_publish_dates(len(rows), pins_per_day)
+    # Pinterest requires the Thumbnail column ONLY for video Pins, and wants it
+    # left blank for image Pins - filling it in for images is itself a formatting error.
+    thumbnail_value = PINTEREST_THUMBNAIL if MAKE_VIDEO else ""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Title", "Media URL", "Pinterest board", "Thumbnail", "Description", "Link", "Publish date", "Keywords"])
@@ -486,7 +489,7 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
                 row.get("title", ""),
                 row.get("media_url", ""),
                 PINTEREST_BOARD,
-                PINTEREST_THUMBNAIL,
+                thumbnail_value,
                 "",
                 row.get("link", ""),
                 publish_date,
