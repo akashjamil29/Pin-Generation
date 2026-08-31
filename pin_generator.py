@@ -305,22 +305,95 @@ NON_CONTENT_IMG_HINTS = (
     "placeholder", "badge", "button", "social", "share-icon", "ads/", "/ad-",
 )
 
+# Class/id/tag hints for containers that are NOT the article's own content -
+# related-post widgets, "you might also like" carousels, sidebars, footers,
+# comment sections, etc. An <img> whose parent chain matches any of these
+# is skipped, even if its filename looks perfectly innocent - this is what
+# was missing before, and it's what let an unrelated celebrity's thumbnail
+# from a "See Also" module get picked up as if it were this article's photo.
+NON_CONTENT_CONTAINER_HINTS = (
+    "related", "recommend", "widget", "sidebar", "footer", "comment",
+    "newsletter", "trending", "sponsor", "promo", "recirc", "see-also",
+    "seealso", "read-next", "readnext", "up-next", "upnext", "similar",
+    "share", "social", "birthday", "also-like", "you-might", "you-may",
+)
+NON_CONTENT_CONTAINER_TAGS = ("nav", "footer", "aside")
+
+# Heading text that marks the start of a "related content" section - once one
+# of these is hit while scanning down the page, we stop looking for a second
+# photo entirely rather than risk wandering into unrelated articles.
+STOP_SECTION_PHRASES = (
+    "see also", "related", "you might also like", "you may also like",
+    "read next", "more from", "recommended", "trending now", "recent",
+    "continue reading", "up next", "read more", "similar", "next up",
+    "you might like", "more like this", "keep reading",
+)
+
+
+def _is_in_non_content_container(tag) -> bool:
+    for parent in tag.parents:
+        if getattr(parent, "name", None) in NON_CONTENT_CONTAINER_TAGS:
+            return True
+        attrs = " ".join(parent.get("class", []) or [])
+        attrs += " " + (parent.get("id") or "")
+        attrs = attrs.lower()
+        if any(hint in attrs for hint in NON_CONTENT_CONTAINER_HINTS):
+            return True
+    return False
+
+
+def _find_secondary_image(soup, main_image_url: str) -> str:
+    """
+    Looks for a second, genuinely different content photo - scoped to the
+    actual article body (<article> if present, else the whole page), and
+    stops the moment it hits anything that looks like a "related articles /
+    you might also like / recent posts" section, since those link to OTHER
+    articles with OTHER photos. Returns the LAST qualifying image found
+    before any such stop point, or "" if none was found - an empty result
+    just means the pin falls back to repeating the main photo, which is
+    always the safe outcome.
+    """
+    scope = soup.find("article") or soup
+    found = ""
+    for tag in scope.find_all(["img", "h1", "h2", "h3", "h4", "h5"]):
+        if tag.name != "img":
+            heading_text = tag.get_text(strip=True).lower()
+            if any(phrase in heading_text for phrase in STOP_SECTION_PHRASES):
+                break  # hit a "related content" heading - stop looking entirely
+            continue
+
+        src = tag.get("src") or tag.get("data-src")
+        if not src or not src.startswith("http"):
+            continue
+        if src == main_image_url:
+            continue
+        lowered = src.lower()
+        if any(hint in lowered for hint in NON_CONTENT_IMG_HINTS):
+            continue
+        if _is_in_non_content_container(tag):
+            continue
+        found = src  # keep overwriting - ends up as the last qualifying image before any stop point
+    return found
+
 
 def extract_title_and_image(article_url: str) -> Tuple[str, str, str]:
     """
     Visit an article page and pull out its headline + main photo (the
     "homepage"/og:image photo used at the top of the pin), plus - if one is
-    available - the LAST different photo found further down the article
-    (used at the bottom of the pin). Most sites (including BoredPanda) tag
-    the headline/main photo with "Open Graph" meta tags - the same tags
-    Facebook/Twitter use to build a preview card when you paste a link. We
-    read those tags directly instead of guessing. Falls back to the <title>
-    tag and the first big <img> if OG tags are missing.
+    genuinely available - a second, different photo from later in the SAME
+    article (used at the bottom of the pin). Most sites (including
+    BoredPanda) tag the headline/main photo with "Open Graph" meta tags -
+    the same tags Facebook/Twitter use to build a preview card when you
+    paste a link. We read those tags directly instead of guessing. Falls
+    back to the <title> tag and the first big <img> if OG tags are missing.
 
-    Using two different real photos (top = main/og:image, bottom = the last
-    distinct photo on the page) instead of the same one twice makes a pin
-    look like genuine content rather than a template. If no second usable
-    photo is found, the pin falls back to repeating the main photo.
+    The second photo is deliberately scoped to the article's own content and
+    stops before any "related articles / you might also like" section - see
+    _find_secondary_image(). Without that, a single-photo article (many
+    BoredPanda bio pages only have one real photo) would end up grabbing an
+    unrelated celebrity's thumbnail from that module instead, which is
+    exactly the "mixed images" bug this was fixed for. If no second usable
+    photo is found, the pin safely falls back to repeating the main photo.
     """
     resp = requests.get(article_url, timeout=20, headers=REQUEST_HEADERS)
     resp.raise_for_status()
@@ -349,17 +422,7 @@ def extract_title_and_image(article_url: str) -> Tuple[str, str, str]:
     if not title or not image_url:
         raise ValueError(f"Could not find title/image on page (title={bool(title)}, image={bool(image_url)})")
 
-    secondary_image_url = ""
-    for img_tag in soup.find_all("img"):
-        src = img_tag.get("src") or img_tag.get("data-src")
-        if not src or not src.startswith("http"):
-            continue
-        if src == image_url:
-            continue  # same as the main photo - not a real second image
-        lowered = src.lower()
-        if any(hint in lowered for hint in NON_CONTENT_IMG_HINTS):
-            continue  # looks like a logo/icon/ad, not article content
-        secondary_image_url = src  # keep overwriting - ends up as the LAST matching image on the page
+    secondary_image_url = _find_secondary_image(soup, image_url)
 
     return title, image_url, secondary_image_url
 
