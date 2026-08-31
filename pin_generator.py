@@ -308,21 +308,19 @@ NON_CONTENT_IMG_HINTS = (
 
 def extract_title_and_image(article_url: str) -> Tuple[str, str, str]:
     """
-    Visit an article page and pull out its headline + main photo, plus - if
-    one is available - a second, DIFFERENT photo from the article body.
-    Most sites (including BoredPanda) tag the headline/main photo with
-    "Open Graph" meta tags - the same tags Facebook/Twitter use to build a
-    preview card when you paste a link. We read those tags directly instead
-    of guessing. Falls back to the <title> tag and the first big <img> if OG
-    tags are missing.
+    Visit an article page and pull out its headline + main photo (the
+    "homepage"/og:image photo used at the top of the pin), plus - if one is
+    available - the LAST different photo found further down the article
+    (used at the bottom of the pin). Most sites (including BoredPanda) tag
+    the headline/main photo with "Open Graph" meta tags - the same tags
+    Facebook/Twitter use to build a preview card when you paste a link. We
+    read those tags directly instead of guessing. Falls back to the <title>
+    tag and the first big <img> if OG tags are missing.
 
-    Using two different real photos (instead of the same one twice) makes a
-    pin look like genuine content rather than a template, which is one of
-    the few things actually within this script's control that Pinterest's
-    own creator guidance ties to better engagement - engagement (saves,
-    closeups, clicks) is what actually drives further distribution, not any
-    setting in this script. If no second usable photo is found, the pin
-    falls back to the old behavior of repeating the main photo.
+    Using two different real photos (top = main/og:image, bottom = the last
+    distinct photo on the page) instead of the same one twice makes a pin
+    look like genuine content rather than a template. If no second usable
+    photo is found, the pin falls back to repeating the main photo.
     """
     resp = requests.get(article_url, timeout=20, headers=REQUEST_HEADERS)
     resp.raise_for_status()
@@ -361,8 +359,7 @@ def extract_title_and_image(article_url: str) -> Tuple[str, str, str]:
         lowered = src.lower()
         if any(hint in lowered for hint in NON_CONTENT_IMG_HINTS):
             continue  # looks like a logo/icon/ad, not article content
-        secondary_image_url = src
-        break
+        secondary_image_url = src  # keep overwriting - ends up as the LAST matching image on the page
 
     return title, image_url, secondary_image_url
 
