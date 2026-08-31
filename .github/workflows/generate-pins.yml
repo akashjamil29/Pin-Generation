@@ -12,7 +12,7 @@ on:
         required: false
         default: "utm_source=pinterest&utm_medium=social&utm_campaign=akash"
       make_video:
-        description: "Also generate a video for each pin?"
+        description: "true = video pins only (CSV links to .mp4). false = picture pins only (CSV links to .jpg). Never both."
         required: false
         type: choice
         options:
@@ -56,7 +56,6 @@ jobs:
           PINS_PER_DAY: ${{ inputs.pins_per_day }}
           UTM_QUERY: ${{ inputs.utm_query }}
           MAKE_VIDEO: ${{ inputs.make_video }}
-          COMMIT_VIDEOS: ${{ vars.COMMIT_VIDEOS }}
         run: python pin_generator.py
 
       - name: Commit and push pins to the repo
