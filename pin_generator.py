@@ -94,6 +94,18 @@ PINS_PER_DAY / UTM_QUERY unset to be prompted for them instead:
                                 Defaults to "4,5,6".
     VIDEO_FPS                   - optional. Defaults to 30.
 
+NOTE on "the algorithm": there's no secret setting that makes Pinterest's
+ranking system push a pin to more people - what this script does is get the
+concrete, documented things right that Pinterest's own creator guidance
+says it weighs: correct technical formatting (so pins don't get silently
+dropped), keyword-rich titles/descriptions/keywords that match how people
+actually search, a real Pinterest-preferred 2:3 image, topic-specific
+boards, a steady posting cadence, and - now - two different real photos per
+pin instead of one repeated twice, since genuinely varied, native-feeling
+content is one of the few remaining engagement factors this script can
+influence. None of that can force virality; it just removes the reasons a
+pin would underperform for avoidable, fixable reasons.
+
 NOTE on "trending boards": there's no public API or reliable data source
 that exposes which specific Pinterest board names are trending right now,
 so this script can't pick board names based on live trend data. What it
@@ -198,6 +210,20 @@ BOARD_RULES = [
 ]
 
 
+# A couple of extra, board-level search phrases appended to every pin's
+# Keywords field on top of the words pulled from its own title. This widens
+# what a pin can be found under (e.g. someone searching "celebrity net worth"
+# who never typed the exact headline) without resorting to generic spam tags -
+# each phrase here is still a real, specific thing people search for.
+BOARD_KEYWORDS = {
+    "Celebrity Bios": ["celebrity biography", "celebrity net worth"],
+    "Celebrity News & Drama": ["celebrity news", "celebrity scandal"],
+    "Celebrity Relationships": ["celebrity couples", "celebrity relationships"],
+    "Bizarre Facts": ["fun facts", "did you know"],
+    "Weird & Viral Stories": ["viral story", "weird news"],
+}
+
+
 def pick_board(title: str) -> str:
     """Return the topic-specific board name for a pin's title, based on BOARD_RULES.
     Falls back to PINTEREST_BOARD if no keyword matches."""
@@ -271,13 +297,32 @@ def fetch_image(url: str) -> Image.Image:
     return img
 
 
-def extract_title_and_image(article_url: str) -> Tuple[str, str]:
+# Substrings that mark an <img> as decoration/UI rather than real article
+# content (logos, avatars, ad pixels, tracking beacons, social icons, etc.) -
+# used when hunting for a second photo below.
+NON_CONTENT_IMG_HINTS = (
+    "logo", "avatar", "icon", "sprite", "pixel", "tracking", "spacer",
+    "placeholder", "badge", "button", "social", "share-icon", "ads/", "/ad-",
+)
+
+
+def extract_title_and_image(article_url: str) -> Tuple[str, str, str]:
     """
-    Visit an article page and pull out its headline + main photo.
-    Most sites (including BoredPanda) tag these with "Open Graph" meta tags
-    - the same tags Facebook/Twitter use to build a preview card when you
-    paste a link. We read those tags directly instead of guessing.
-    Falls back to the <title> tag and the first big <img> if OG tags are missing.
+    Visit an article page and pull out its headline + main photo, plus - if
+    one is available - a second, DIFFERENT photo from the article body.
+    Most sites (including BoredPanda) tag the headline/main photo with
+    "Open Graph" meta tags - the same tags Facebook/Twitter use to build a
+    preview card when you paste a link. We read those tags directly instead
+    of guessing. Falls back to the <title> tag and the first big <img> if OG
+    tags are missing.
+
+    Using two different real photos (instead of the same one twice) makes a
+    pin look like genuine content rather than a template, which is one of
+    the few things actually within this script's control that Pinterest's
+    own creator guidance ties to better engagement - engagement (saves,
+    closeups, clicks) is what actually drives further distribution, not any
+    setting in this script. If no second usable photo is found, the pin
+    falls back to the old behavior of repeating the main photo.
     """
     resp = requests.get(article_url, timeout=20, headers=REQUEST_HEADERS)
     resp.raise_for_status()
@@ -306,7 +351,20 @@ def extract_title_and_image(article_url: str) -> Tuple[str, str]:
     if not title or not image_url:
         raise ValueError(f"Could not find title/image on page (title={bool(title)}, image={bool(image_url)})")
 
-    return title, image_url
+    secondary_image_url = ""
+    for img_tag in soup.find_all("img"):
+        src = img_tag.get("src") or img_tag.get("data-src")
+        if not src or not src.startswith("http"):
+            continue
+        if src == image_url:
+            continue  # same as the main photo - not a real second image
+        lowered = src.lower()
+        if any(hint in lowered for hint in NON_CONTENT_IMG_HINTS):
+            continue  # looks like a logo/icon/ad, not article content
+        secondary_image_url = src
+        break
+
+    return title, image_url, secondary_image_url
 
 
 def cover_resize(img: Image.Image, width: int, height: int) -> Image.Image:
@@ -413,12 +471,20 @@ def add_watermark(canvas: Image.Image, text: str) -> Image.Image:
     return Image.alpha_composite(canvas, overlay).convert("RGB")
 
 
-def build_pin(image: Image.Image, title: str) -> Image.Image:
+def build_pin(image: Image.Image, title: str, secondary_image: Image.Image = None) -> Image.Image:
+    """
+    secondary_image, if given, is used for the bottom photo block instead of
+    repeating `image` twice - two different real photos read as more
+    "native" content and less like a template, which is a small but genuine
+    engagement factor. Falls back to repeating `image` when no second photo
+    was found (this is exactly the old behavior).
+    """
     canvas = Image.new("RGB", (PIN_WIDTH, PIN_HEIGHT), "white")
 
-    photo = cover_resize(image, PIN_WIDTH, IMAGE_HEIGHT)
-    canvas.paste(photo, (0, 0))
-    canvas.paste(photo, (0, IMAGE_HEIGHT + TITLE_BAND_HEIGHT))
+    photo_top = cover_resize(image, PIN_WIDTH, IMAGE_HEIGHT)
+    photo_bottom = cover_resize(secondary_image, PIN_WIDTH, IMAGE_HEIGHT) if secondary_image else photo_top
+    canvas.paste(photo_top, (0, 0))
+    canvas.paste(photo_bottom, (0, IMAGE_HEIGHT + TITLE_BAND_HEIGHT))
 
     start_rgb, end_rgb = random.choice(COLOR_PALETTES)
     text_color = pick_text_color(start_rgb, end_rgb)
@@ -588,13 +654,17 @@ def _significant_words(title: str):
     return words
 
 
-def generate_keywords(title: str, max_keywords: int = 8) -> str:
+def generate_keywords(title: str, board: str = None, max_keywords: int = 10) -> str:
     """
     Builds a comma-separated list of search-style keyword phrases from a pin's
     title - what Pinterest's own guidance calls matching 'how people actually
     search' rather than single generic tags. Favors longer, more specific
     phrases first (the full cleaned title, then two-word phrases), since
-    long-tail phrases rank better than single broad words.
+    long-tail phrases rank better than single broad words. If `board` is
+    given, a couple of that board's own search-style phrases (BOARD_KEYWORDS)
+    are appended at the end, so the pin can also be found by broader
+    category searches, not only by words that happened to be in this exact
+    headline.
     """
     words = _significant_words(title)
     if not words:
@@ -608,6 +678,9 @@ def generate_keywords(title: str, max_keywords: int = 8) -> str:
     for w in words:
         if w not in keywords and len(w) > 3:
             keywords.append(w)
+    for bonus in BOARD_KEYWORDS.get(board, []):
+        if bonus not in keywords:
+            keywords.append(bonus)
 
     seen, unique = set(), []
     for k in keywords:
@@ -626,9 +699,16 @@ def generate_description(title: str, max_len: int = PINTEREST_DESCRIPTION_MAX_LE
     keyword-rich title - Pinterest's algorithm weighs the START of the
     description most heavily, so front-loading the exact search terms here
     (rather than leaving this column blank, or burying them after fluff)
-    is one of the highest-leverage things this field can do.
+    is one of the highest-leverage things this field can do. Ends with a
+    plain, honest nudge toward saving the pin - saves are one of the
+    strongest engagement signals Pinterest's own guidance says it rewards,
+    and simply asking (without misleading claims) is a legitimate, common
+    practice, not manipulation.
     """
-    desc = f"{title} — see the full story."
+    desc = f"{title} — tap to read the full story, and save this pin so you don't lose it."
+    if len(desc) <= max_len:
+        return desc
+    desc = f"{title} — save this pin for later."
     if len(desc) <= max_len:
         return desc
     return truncate_title(title, max_len)
@@ -650,15 +730,16 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
         writer.writerow(["Title", "Media URL", "Pinterest board", "Thumbnail", "Description", "Link", "Publish date", "Keywords"])
         for row, publish_date in zip(rows, dates):
             title = row.get("title", "")
+            board = pick_board(title) if title else PINTEREST_BOARD
             writer.writerow([
                 truncate_title(title) if title else "",
                 row.get("media_url", ""),
-                pick_board(title) if title else PINTEREST_BOARD,
+                board,
                 thumbnail_value,
                 generate_description(title) if title else "",
                 row.get("link", ""),
                 publish_date,
-                generate_keywords(title) if title else "",
+                generate_keywords(title, board) if title else "",
             ])
     return path
 
@@ -784,10 +865,11 @@ def main():
                 continue
 
         try:
+            secondary_image_url = ""
             if use_article_mode:
-                title, image_url = extract_title_and_image(article_url)
+                title, image_url, secondary_image_url = extract_title_and_image(article_url)
             else:
-                title = title_value
+                title = title_value  # direct image+title mode only ever supplies one photo per row
 
             out_name = f"{i+1:04d}-{slugify(title)}.jpg"
             # The JPEG is always built first (it's the source frame for the video too),
@@ -797,7 +879,13 @@ def main():
             out_path = os.path.join(LATEST_RUN_DIR, out_name)
 
             img = fetch_image(image_url)
-            pin = build_pin(img, title)
+            secondary_img = None
+            if secondary_image_url:
+                try:
+                    secondary_img = fetch_image(secondary_image_url)
+                except Exception:
+                    secondary_img = None  # falls back to repeating the main photo below - not fatal
+            pin = build_pin(img, title, secondary_img)
             pin.save(out_path, "JPEG", quality=JPEG_QUALITY, optimize=True)
 
             if MAKE_VIDEO:
