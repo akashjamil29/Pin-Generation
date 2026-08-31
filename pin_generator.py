@@ -348,13 +348,13 @@ def _find_secondary_image(soup, main_image_url: str) -> str:
     actual article body (<article> if present, else the whole page), and
     stops the moment it hits anything that looks like a "related articles /
     you might also like / recent posts" section, since those link to OTHER
-    articles with OTHER photos. Returns the LAST qualifying image found
-    before any such stop point, or "" if none was found - an empty result
-    just means the pin falls back to repeating the main photo, which is
-    always the safe outcome.
+    articles with OTHER photos. Returns the FIRST qualifying image found
+    after the main photo (i.e. the article's actual 2nd photo, in reading
+    order) and before any such stop point, or "" if none was found - an
+    empty result just means the pin falls back to repeating the main photo,
+    which is always the safe outcome.
     """
     scope = soup.find("article") or soup
-    found = ""
     for tag in scope.find_all(["img", "h1", "h2", "h3", "h4", "h5"]):
         if tag.name != "img":
             heading_text = tag.get_text(strip=True).lower()
@@ -372,8 +372,8 @@ def _find_secondary_image(soup, main_image_url: str) -> str:
             continue
         if _is_in_non_content_container(tag):
             continue
-        found = src  # keep overwriting - ends up as the last qualifying image before any stop point
-    return found
+        return src  # first qualifying image after the main photo - stop here
+    return ""
 
 
 def extract_title_and_image(article_url: str) -> Tuple[str, str, str]:
