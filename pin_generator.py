@@ -342,6 +342,24 @@ def _is_in_non_content_container(tag) -> bool:
     return False
 
 
+# WordPress/BoredPanda-style CDN resize suffix, e.g. "...photo-800x450.jpg" -
+# stripped so a resized copy of the SAME photo isn't mistaken for a
+# different one when comparing to the main image.
+_WP_SIZE_SUFFIX_RE = re.compile(r"-\d+x\d+(?=\.\w+$)")
+
+
+def _image_identity(url: str) -> str:
+    """
+    Reduces an image URL to a stable identity (host + path, resize suffix
+    and query string/CDN params stripped) so two URLs that are really just
+    different-sized/cropped/query-string variants of the SAME underlying
+    photo are recognized as duplicates - not as a genuine "second photo".
+    """
+    parsed = urlparse(url)
+    path = _WP_SIZE_SUFFIX_RE.sub("", parsed.path)
+    return f"{parsed.netloc}{path}".lower()
+
+
 def _find_secondary_image(soup, main_image_url: str) -> str:
     """
     Looks for a second, genuinely different content photo - scoped to the
@@ -353,8 +371,14 @@ def _find_secondary_image(soup, main_image_url: str) -> str:
     order) and before any such stop point, or "" if none was found - an
     empty result just means the pin falls back to repeating the main photo,
     which is always the safe outcome.
+
+    Duplicate check is identity-based, not exact-string-based: a resized or
+    query-string variant of the SAME photo the main image already uses is
+    still treated as a duplicate and skipped, so the pin never ends up with
+    the same photo twice under two different-looking URLs.
     """
     scope = soup.find("article") or soup
+    main_identity = _image_identity(main_image_url)
     for tag in scope.find_all(["img", "h1", "h2", "h3", "h4", "h5"]):
         if tag.name != "img":
             heading_text = tag.get_text(strip=True).lower()
@@ -365,14 +389,14 @@ def _find_secondary_image(soup, main_image_url: str) -> str:
         src = tag.get("src") or tag.get("data-src")
         if not src or not src.startswith("http"):
             continue
-        if src == main_image_url:
-            continue
+        if _image_identity(src) == main_identity:
+            continue  # same underlying photo as the main image - not a real second photo
         lowered = src.lower()
         if any(hint in lowered for hint in NON_CONTENT_IMG_HINTS):
             continue
         if _is_in_non_content_container(tag):
             continue
-        return src  # first qualifying image after the main photo - stop here
+        return src  # first genuinely different photo after the main photo - stop here
     return ""
 
 
