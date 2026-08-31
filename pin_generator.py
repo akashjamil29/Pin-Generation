@@ -471,6 +471,27 @@ def build_publish_dates(count: int, pins_per_day: int):
     return dates
 
 
+PINTEREST_TITLE_MAX_LEN = 100  # Pinterest's hard limit for the Title column
+
+
+def truncate_title(title: str, max_len: int = PINTEREST_TITLE_MAX_LEN) -> str:
+    """
+    Trims a title down to Pinterest's 100-character Title limit, cutting on a
+    word boundary where possible and adding an ellipsis so it's still
+    readable. Titles over the limit are a real formatting error that makes
+    Pinterest silently drop that row from the bulk upload.
+    """
+    title = title.strip()
+    if len(title) <= max_len:
+        return title
+    ellipsis = "…"
+    budget = max_len - len(ellipsis)
+    cut = title[:budget]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut + ellipsis
+
+
 def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
     """
     rows: list of dicts with keys "title", "media_url", "link" - one per
@@ -485,8 +506,9 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
         writer = csv.writer(f)
         writer.writerow(["Title", "Media URL", "Pinterest board", "Thumbnail", "Description", "Link", "Publish date", "Keywords"])
         for row, publish_date in zip(rows, dates):
+            title = row.get("title", "")
             writer.writerow([
-                row.get("title", ""),
+                truncate_title(title) if title else "",
                 row.get("media_url", ""),
                 PINTEREST_BOARD,
                 thumbnail_value,
