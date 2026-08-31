@@ -71,18 +71,19 @@ PINS_PER_DAY / UTM_QUERY unset to be prompted for them instead:
                                 GOOGLE_SERVICE_ACCOUNT_JSON to write links back.
     PIN_LINK_COL              - optional. Defaults to "Pin Link".
 
-    MAKE_VIDEO                 - optional. "true"/"false", defaults to "true". If on, every
-                                pin also gets turned into a silent .mp4 of the same image held
-                                on screen for a random duration (see VIDEO_DURATIONS). Requires
-                                ffmpeg to be installed and on PATH.
+    MAKE_VIDEO                 - optional. "true"/"false", defaults to "true".
+                                "true"  = every pin is a silent .mp4 (the image held on screen
+                                          for a random duration - see VIDEO_DURATIONS). The
+                                          bulk-upload CSV's Media URL points at the video, and
+                                          only the video is committed permanently into
+                                          pins/videos/. Requires ffmpeg on PATH.
+                                "false" = every pin is a plain .jpg, committed into pins/, and
+                                          that's what the CSV points at.
+                                Each row only ever gets ONE media type - never both - so the
+                                Pinterest bulk-upload CSV only ever uploads one thing per row.
     VIDEO_DURATIONS            - optional. Comma-separated seconds to pick randomly from.
                                 Defaults to "4,5,6".
     VIDEO_FPS                  - optional. Defaults to 30.
-    COMMIT_VIDEOS              - optional. "true"/"false", defaults to "false". If on, videos
-                                are also committed permanently into pins/videos/ in the repo
-                                (videos are much bigger than JPEGs, so this is off by default -
-                                every run's videos are always available in the downloadable
-                                latest_run/videos/ artifact regardless of this setting).
 """
 
 import csv
@@ -124,12 +125,10 @@ JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "85"))
 MAKE_VIDEO = os.environ.get("MAKE_VIDEO", "true").strip().lower() in ("1", "true", "yes")
 VIDEO_DURATIONS = [int(x) for x in os.environ.get("VIDEO_DURATIONS", "4,5,6").split(",") if x.strip()]
 VIDEO_FPS = int(os.environ.get("VIDEO_FPS", "30"))
-# Videos are always saved into latest_run/videos/ (this run's download).
-# Set this to "true" only if you also want them committed permanently into
-# the repo under pins/videos/ - video files are much bigger than JPEGs, so
-# leaving this off keeps the repo small (matches the "repo grows over time"
-# note in the README).
-COMMIT_VIDEOS = os.environ.get("COMMIT_VIDEOS", "false").strip().lower() in ("1", "true", "yes")
+# When MAKE_VIDEO is on, every video is committed permanently into pins/videos/
+# (needed so its raw GitHub URL is publicly reachable for the Pinterest CSV).
+# The JPEG frame it's built from is only kept in this run's download folder,
+# not committed - so each row's CSV entry points at exactly one media type.
 
 # Pinterest bulk-upload CSV formatting
 PINTEREST_BOARD = os.environ.get("PINTEREST_BOARD", "Boredpanda Viral")
@@ -560,8 +559,7 @@ def main():
     os.makedirs(LATEST_RUN_DIR, exist_ok=True)
     if MAKE_VIDEO:
         os.makedirs(os.path.join(LATEST_RUN_DIR, "videos"), exist_ok=True)
-        if COMMIT_VIDEOS:
-            os.makedirs(os.path.join(OUTPUT_DIR, "videos"), exist_ok=True)
+        os.makedirs(os.path.join(OUTPUT_DIR, "videos"), exist_ok=True)
 
     print(f"Fetching sheet: {SHEET_CSV_URL}")
     df = pd.read_csv(SHEET_CSV_URL)
@@ -614,28 +612,39 @@ def main():
                 title = title_value
 
             out_name = f"{i+1:04d}-{slugify(title)}.jpg"
-            out_path = os.path.join(OUTPUT_DIR, out_name)
+            # The JPEG is always built first (it's the source frame for the video too),
+            # but it only lands in this run's download folder - NOT in the permanently
+            # hosted pins/ folder unless we're actually in picture-only mode. This keeps
+            # the CSV pointing at exactly one media type per row, matching what was picked.
+            out_path = os.path.join(LATEST_RUN_DIR, out_name)
 
             img = fetch_image(image_url)
             pin = build_pin(img, title)
             pin.save(out_path, "JPEG", quality=JPEG_QUALITY, optimize=True)
-            shutil.copy2(out_path, os.path.join(LATEST_RUN_DIR, out_name))  # copy for this run's download only - pins/ (permanent hosting) is untouched
-            pin_link = build_pin_link(out_name)
-            row_title = title
-            success += 1
-            print(f"[OK]   {out_name}")
 
             if MAKE_VIDEO:
+                # Video mode: the JPEG above is only a stepping stone. Only the .mp4
+                # gets permanently hosted and referenced in the CSV - no picture link
+                # ever ends up in the CSV alongside it.
                 video_name = out_name.rsplit(".", 1)[0] + ".mp4"
                 video_duration = random.choice(VIDEO_DURATIONS)  # random 4/5/6 sec (or whatever VIDEO_DURATIONS is set to)
-                try:
-                    latest_video_path = os.path.join(LATEST_RUN_DIR, "videos", video_name)
-                    build_pin_video(out_path, latest_video_path, video_duration, VIDEO_FPS)
-                    if COMMIT_VIDEOS:
-                        shutil.copy2(latest_video_path, os.path.join(OUTPUT_DIR, "videos", video_name))
-                    print(f"[OK]   {video_name} ({video_duration}s)")
-                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    print(f"[WARN] video failed for {out_name}: {e}", file=sys.stderr)
+                latest_video_path = os.path.join(LATEST_RUN_DIR, "videos", video_name)
+                build_pin_video(out_path, latest_video_path, video_duration, VIDEO_FPS)
+                permanent_video_path = os.path.join(OUTPUT_DIR, "videos", video_name)
+                os.makedirs(os.path.dirname(permanent_video_path), exist_ok=True)
+                shutil.copy2(latest_video_path, permanent_video_path)
+                pin_link = build_pin_link(f"videos/{video_name}")
+                print(f"[OK]   {video_name} ({video_duration}s)")
+            else:
+                # Picture-only mode: the JPEG itself is the pin - commit it permanently
+                # and point the CSV at it.
+                permanent_image_path = os.path.join(OUTPUT_DIR, out_name)
+                shutil.copy2(out_path, permanent_image_path)
+                pin_link = build_pin_link(out_name)
+                print(f"[OK]   {out_name}")
+
+            row_title = title
+            success += 1
         except Exception as e:
             failed += 1
             print(f"[FAIL] row {i+1}: {e}", file=sys.stderr)
