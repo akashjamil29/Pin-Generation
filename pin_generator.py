@@ -472,6 +472,21 @@ def build_publish_dates(count: int, pins_per_day: int):
 
 
 PINTEREST_TITLE_MAX_LEN = 100  # Pinterest's hard limit for the Title column
+PINTEREST_DESCRIPTION_MAX_LEN = 200  # Pinterest allows up to 500, but the algorithm reads the
+                                      # keywords at the START of the description most heavily,
+                                      # so a tight 100-200 char description outperforms a long one.
+
+# Common low-value words filtered out when building keyword phrases from a title -
+# Pinterest's algorithm matches on the specific, searchable terms, not connector words.
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "for",
+    "by", "with", "is", "are", "was", "were", "this", "that", "these", "those",
+    "it", "its", "as", "from", "after", "before", "about", "into", "over",
+    "under", "your", "you", "his", "her", "their", "they", "he", "she", "we",
+    "i", "us", "our", "be", "been", "has", "have", "had", "do", "does", "did",
+    "will", "would", "can", "could", "should", "not", "no", "yes", "up",
+    "down", "out", "off", "than", "then", "so", "if",
+}
 
 
 def truncate_title(title: str, max_len: int = PINTEREST_TITLE_MAX_LEN) -> str:
@@ -490,6 +505,59 @@ def truncate_title(title: str, max_len: int = PINTEREST_TITLE_MAX_LEN) -> str:
     if " " in cut:
         cut = cut.rsplit(" ", 1)[0]
     return cut + ellipsis
+
+
+def _significant_words(title: str):
+    """Lowercases, strips punctuation, and drops stopwords/very short words from a title."""
+    text = re.sub(r"[^\w\s]", " ", title.lower())
+    words = [w for w in text.split() if w not in STOPWORDS and len(w) > 1]
+    return words
+
+
+def generate_keywords(title: str, max_keywords: int = 8) -> str:
+    """
+    Builds a comma-separated list of search-style keyword phrases from a pin's
+    title - what Pinterest's own guidance calls matching 'how people actually
+    search' rather than single generic tags. Favors longer, more specific
+    phrases first (the full cleaned title, then two-word phrases), since
+    long-tail phrases rank better than single broad words.
+    """
+    words = _significant_words(title)
+    if not words:
+        return ""
+
+    keywords = [" ".join(words)]  # the full phrase - most specific, matches exact searches
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]} {words[i + 1]}"
+        if bigram not in keywords:
+            keywords.append(bigram)
+    for w in words:
+        if w not in keywords and len(w) > 3:
+            keywords.append(w)
+
+    seen, unique = set(), []
+    for k in keywords:
+        if k in seen:
+            continue
+        seen.add(k)
+        unique.append(k)
+        if len(unique) >= max_keywords:
+            break
+    return ", ".join(unique)
+
+
+def generate_description(title: str, max_len: int = PINTEREST_DESCRIPTION_MAX_LEN) -> str:
+    """
+    Builds a short, natural-language description that leads with the pin's
+    keyword-rich title - Pinterest's algorithm weighs the START of the
+    description most heavily, so front-loading the exact search terms here
+    (rather than leaving this column blank, or burying them after fluff)
+    is one of the highest-leverage things this field can do.
+    """
+    desc = f"{title} — see the full story."
+    if len(desc) <= max_len:
+        return desc
+    return truncate_title(title, max_len)
 
 
 def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
@@ -512,10 +580,10 @@ def save_pinterest_bulk_csv(rows, path, pins_per_day: int):
                 row.get("media_url", ""),
                 PINTEREST_BOARD,
                 thumbnail_value,
-                "",
+                generate_description(title) if title else "",
                 row.get("link", ""),
                 publish_date,
-                "",
+                generate_keywords(title) if title else "",
             ])
     return path
 
